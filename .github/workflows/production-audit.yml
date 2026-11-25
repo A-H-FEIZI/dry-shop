@@ -1,0 +1,71 @@
+name: Verify the deployed MARTO storefront
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  production-audit:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.head.ref == 'preview/live-url'
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check the live site with Playwright MCP and Lighthouse
+        env:
+          PRODUCTION_URL: https://dry-shop-sepia.vercel.app/
+        run: |
+          mkdir -p "$RUNNER_TEMP/marto-audit"
+          cd "$RUNNER_TEMP/marto-audit"
+          npm install --no-save @modelcontextprotocol/sdk@1.32.2 @playwright/mcp@0.0.86 lighthouse@13.6.0
+          cat > production.mjs <<'MARTO_SCRIPT'
+          import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+          import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
+          import { writeFile } from 'node:fs/promises'
+          import { resolve } from 'node:path'
+          const client = new Client({name: 'marto-production-audit', version: '1.0.0'})
+          const transport = new StdioClientTransport({
+            command: process.execPath,
+            args: [resolve('node_modules/@playwright/mcp/cli.js'), '--headless', '--isolated',
+              '--browser', 'chrome', '--no-sandbox', '--output-dir', process.cwd()],
+          })
+          const call = async (name, args) => {
+            const result = await client.callTool({name, arguments: args})
+            const text = result.content.map(item => item.type === 'text' ? item.text : item.type).join('\n')
+            if (result.isError) throw new Error(text)
+            return text
+          }
+          try {
+            await client.connect(transport)
+            const tools = (await client.listTools()).tools
+            const options = Object.keys(tools.find(tool => tool.name === 'browser_network_requests').inputSchema.properties)
+            const networkArgs = Object.fromEntries(options.filter(key => /static/i.test(key)).map(key => [key, true]))
+            await call('browser_resize', {width: 390, height: 844})
+            await call('browser_navigate', {url: process.env.PRODUCTION_URL})
+            const products = await call('browser_evaluate', {
+              function: 'async () => { const until = Date.now() + 25000; while (!document.querySelector("a[href*=product]") && Date.now() < until) await new Promise(r => setTimeout(r, 250)); return {products: document.querySelectorAll("a[href*=product]").length, viewport: [innerWidth, innerHeight]}; }',
+            })
+            const consoleMessages = await call('browser_console_messages', {level: 'warning'})
+            const requests = await call('browser_network_requests', networkArgs)
+            const results = {products, consoleMessages, requests}
+            console.log(JSON.stringify(results, null, 2))
+            await writeFile('mcp-results.json', JSON.stringify(results, null, 2))
+            if (!/"products"\s*:\s*[1-9]/.test(products)) throw new Error('No products rendered on Production')
+            await call('browser_take_screenshot', {type: 'png', filename: 'mobile.png', fullPage: true})
+          } finally {
+            await client.close()
+          }
+          MARTO_SCRIPT
+          node production.mjs
+          node node_modules/lighthouse/cli/index.js "$PRODUCTION_URL" --quiet --chrome-flags="--headless --no-sandbox" --output=json --output=html --output-path=./lighthouse
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: marto-production-audit
+          path: |
+            ${{ runner.temp }}/marto-audit/mobile.png
+            ${{ runner.temp }}/marto-audit/mcp-results.json
+            ${{ runner.temp }}/marto-audit/lighthouse.report.json
+            ${{ runner.temp }}/marto-audit/lighthouse.report.html
+          if-no-files-found: warn
