@@ -1,1 +1,1 @@
-export const releaseCheck: number = 'ready'
+export const releaseCheck: number = 1
