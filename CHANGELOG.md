@@ -1,9 +1,5 @@
 # Changelog
 
-## [1.0.1] - 2026-11-25
-
-- Added a visible banner for the rollback exercise.
-
 ## [1.0.0] - 2026-11-22
 
 ### Added
